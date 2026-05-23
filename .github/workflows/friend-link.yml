@@ -10,10 +10,10 @@ jobs:
   manage-friend-link:
     if: |
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, '友链申请')) ||
-      (github.event_name == 'issue_comment' && github.event.comment.body == '通过验证' && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && (github.event.comment.body == '通过验证' || github.event.comment.body == '通过') && github.event.comment.user.login == github.repository_owner) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证' && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
-      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '删除友链') && !startsWith(github.event.comment.body, '删除友链并拉黑') && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
-      (github.event_name == 'issue_comment' && github.event.comment.body == '删除友链并拉黑' && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '删除友链') && !startsWith(github.event.comment.body, '删除友链并拉黑') && !startsWith(github.event.comment.body, '删除并拉黑') && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
+      (github.event_name == 'issue_comment' && (github.event.comment.body == '删除友链并拉黑' || github.event.comment.body == '删除并拉黑') && github.event.comment.user.login == github.repository_owner) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '拉黑' && github.event.comment.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     permissions:
@@ -61,11 +61,11 @@ jobs:
 
             if (context.eventName === 'issues') {
               actionType = 'add';
-            } else if (commentBody === '通过验证' && isOwner) {
+            } else if ((commentBody === '通过验证' || commentBody === '通过') && isOwner) {
               actionType = 'add';
             } else if (commentBody === '重新验证') {
               actionType = 'add';
-            } else if (commentBody === '删除友链并拉黑' && isOwner) {
+            } else if ((commentBody === '删除友链并拉黑' || commentBody === '删除并拉黑') && isOwner) {
               actionType = 'delete_and_blacklist';
             } else if (commentBody.startsWith('删除友链') && (context.payload.comment.user.login === context.payload.issue.user.login || isOwner)) {
               actionType = 'delete';
@@ -485,7 +485,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const commentBody = context.eventName === 'issue_comment' ? context.payload.comment.body : '';
-            const isManualApproval = commentBody === '通过验证' && context.payload.comment.user.login === context.repo.owner;
+            const isManualApproval = (commentBody === '通过验证' || commentBody === '通过') && context.payload.comment.user.login === context.repo.owner;
             
             if (!isManualApproval) {
               const labelsToRemove = ['网站不可达', '无效', '已通过'];
@@ -579,7 +579,7 @@ jobs:
         run: |
           URL="${{ steps.validate-fields.outputs.url }}"
           
-          if [ "$COMMENT_USER" = "$REPO_OWNER" ] && [ "$COMMENT_BODY" = "通过验证" ]; then
+          if [ "$COMMENT_USER" = "$REPO_OWNER" ] && ([ "$COMMENT_BODY" = "通过验证" ] || [ "$COMMENT_BODY" = "通过" ]); then
             echo "skip_validation=true" >> $GITHUB_OUTPUT
             exit 0
           fi
@@ -745,6 +745,12 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               name: '网站不可达'
+            }).catch(() => {});
+            await github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: '已删除'
             }).catch(() => {});
             await github.rest.issues.addLabels({
               issue_number: context.issue.number,
