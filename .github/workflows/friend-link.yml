@@ -12,7 +12,7 @@ jobs:
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, '友链申请')) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '通过验证' && github.event.comment.user.login == github.repository_owner) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证' && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
-      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '删除友链') && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '删除友链') && !startsWith(github.event.comment.body, '删除友链并拉黑') && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '删除友链并拉黑' && github.event.comment.user.login == github.repository_owner) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '拉黑' && github.event.comment.user.login == github.repository_owner)
     runs-on: ubuntu-latest
@@ -65,12 +65,12 @@ jobs:
               actionType = 'add';
             } else if (commentBody === '重新验证') {
               actionType = 'add';
-            } else if (commentBody.startsWith('删除友链') && isOwner) {
+            } else if (commentBody === '删除友链并拉黑' && isOwner) {
+              actionType = 'delete_and_blacklist';
+            } else if (commentBody.startsWith('删除友链') && (context.payload.comment.user.login === context.payload.issue.user.login || isOwner)) {
               actionType = 'delete';
               const parts = commentBody.split(' ');
               friendName = parts.slice(1).join(' ').trim();
-            } else if (commentBody === '删除友链并拉黑' && isOwner) {
-              actionType = 'delete_and_blacklist';
             } else if (commentBody === '拉黑' && isOwner) {
               actionType = 'blacklist';
             }
@@ -238,6 +238,7 @@ jobs:
           BLACKLIST_DISCUSSION_NUMBER: ${{ secrets.BLACKLIST_DISCUSSION_NUMBER }}
 
       - name: 处理删除友链
+        id: delete-friend
         if: (steps.action-type.outputs.action_type == 'delete' || steps.action-type.outputs.action_type == 'delete_and_blacklist') && steps.check-blacklist.outputs.blacklisted != 'true'
         uses: actions/github-script@v7
         with:
@@ -352,6 +353,7 @@ jobs:
           target_dir: ${{ steps.detect-repo.outputs.target_dir }}
 
       - name: 处理拉黑
+        id: blacklist-user
         if: (steps.action-type.outputs.action_type == 'blacklist' || steps.action-type.outputs.action_type == 'delete_and_blacklist') && steps.check-blacklist.outputs.blacklisted != 'true'
         uses: actions/github-script@v7
         with:
@@ -558,7 +560,7 @@ jobs:
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `## ❌ URL 格式无效\n\n"${urlRaw}" 不是有效的 URL，请提供完整的 URL（包含 https://）。`
+                body: `## ❌ URL 格式无效\n\n"${urlRaw}" 不是有效的 URL，请提供完整的 URL（包含 https://）。\n\n修复后可编辑此 Issue 重新触发。`
               });
               core.setOutput('valid', 'false');
               return;
