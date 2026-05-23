@@ -7,11 +7,14 @@ on:
     types: [created]
 
 jobs:
-  add-friend:
+  manage-friend-link:
     if: |
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, '友链申请')) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '通过验证' && github.event.comment.user.login == github.repository_owner) ||
-      (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证')
+      (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证' && (github.event.comment.user.login == github.event.issue.user.login || github.event.comment.user.login == github.repository_owner)) ||
+      (github.event_name == 'issue_comment' && startsWith(github.event.comment.body, '删除友链') && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && github.event.comment.body == '删除友链并拉黑' && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && github.event.comment.body == '拉黑' && github.event.comment.user.login == github.repository_owner)
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -43,14 +46,43 @@ jobs:
             fi
           fi
 
+      - name: 判断操作类型
+        id: action-type
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commentBody = context.eventName === 'issue_comment' ? context.payload.comment.body : '';
+            const isOwner = context.eventName === 'issue_comment' ? context.payload.comment.user.login === context.repo.owner : false;
+
+            let actionType = 'add';
+            let friendName = '';
+
+            if (context.eventName === 'issues') {
+              actionType = 'add';
+            } else if (commentBody === '通过验证' && isOwner) {
+              actionType = 'add';
+            } else if (commentBody === '重新验证') {
+              actionType = 'add';
+            } else if (commentBody.startsWith('删除友链') && isOwner) {
+              actionType = 'delete';
+              const parts = commentBody.split(' ');
+              friendName = parts.slice(1).join(' ').trim();
+            } else if (commentBody === '删除友链并拉黑' && isOwner) {
+              actionType = 'delete_and_blacklist';
+            } else if (commentBody === '拉黑' && isOwner) {
+              actionType = 'blacklist';
+            }
+
+            core.setOutput('action_type', actionType);
+            core.setOutput('friend_name', friendName);
+
       - name: 解析 Issue 内容
         id: parse-issue
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const isManualApproval = context.eventName === 'issue_comment' && context.payload.comment.body === '通过验证' && context.payload.comment.user.login === context.repo.owner;
-
             let issue;
             if (context.eventName === 'issue_comment') {
               const response = await github.rest.issues.get({
@@ -63,7 +95,11 @@ jobs:
               issue = context.payload.issue;
             }
 
-            const body = issue.body;
+            const body = issue.body || '';
+            const userLogin = issue.user.login;
+
+            // 检查是否是仓库所有者提出的 Issue（用于拉黑豁免）
+            const isOwnerIssue = userLogin === context.repo.owner;
 
             function extract(key) {
               const pattern = new RegExp('### ' + key + '\\s*\\n\\s*(.*?)(?=\\n###|\\Z)', 's');
@@ -87,14 +123,300 @@ jobs:
             core.setOutput('avatar', avatar);
             core.setOutput('desc', desc);
             core.setOutput('siteshot', siteshot);
-            core.setOutput('is_manual_approval', isManualApproval);
+            core.setOutput('user_login', userLogin);
+            core.setOutput('is_owner_issue', isOwnerIssue ? 'true' : 'false');
 
-      - name: 清理历史标签并添加申请中
+      - name: 检查黑名单
+        id: check-blacklist
+        if: steps.action-type.outputs.action_type == 'add' || steps.action-type.outputs.action_type == 'blacklist'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const isManualApproval = '${{ steps.parse-issue.outputs.is_manual_approval }}' === 'true';
+            const userLogin = '${{ steps.parse-issue.outputs.user_login }}';
+            const urlRaw = '${{ steps.parse-issue.outputs.url_raw }}';
+            const discussionNumber = process.env.BLACKLIST_DISCUSSION_NUMBER;
+
+            // 仓库所有者豁免
+            if (userLogin === context.repo.owner) {
+              core.setOutput('blacklisted', 'false');
+              core.setOutput('exempt', 'true');
+              core.setOutput('exempt_note', String.fromCharCode(10) + String.fromCharCode(10) + '> 💡 此 Issue 由仓库所有者创建，已豁免黑名单检查。');
+              return;
+            }
+
+            if (!discussionNumber) {
+              core.setOutput('blacklisted', 'false');
+              core.setOutput('exempt', 'false');
+              core.setOutput('exempt_note', '');
+              return;
+            }
+
+            let userId = '';
+            try {
+              const userResponse = await github.request('GET /users/{username}', {
+                username: userLogin
+              });
+              userId = userResponse.data.id.toString();
+            } catch (e) {
+              core.setOutput('blacklisted', 'false');
+              core.setOutput('exempt', 'false');
+              core.setOutput('exempt_note', '');
+              return;
+            }
+
+            let hostname = '';
+            try {
+              if (urlRaw) {
+                hostname = new URL(urlRaw).hostname;
+              }
+            } catch (e) {}
+
+            try {
+              const discussion = await github.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    discussion(number: $number) {
+                      body
+                      comments(first: 100) {
+                        nodes {
+                          body
+                        }
+                      }
+                    }
+                  }
+                }
+              `, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                number: parseInt(discussionNumber)
+              });
+
+              const comments = discussion.repository.discussion.comments.nodes;
+              const allText = comments.map(c => c.body).join('\n');
+
+              const idPattern = new RegExp('\\| 被拉黑人 ID \\| (\\d+) \\|', 'g');
+              let match;
+              while ((match = idPattern.exec(allText)) !== null) {
+                if (match[1] === userId) {
+                  await github.rest.issues.createComment({
+                    issue_number: context.issue.number,
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    body: `## 🚫 操作被拒绝\n\n用户 ${userLogin} (ID: ${userId}) 已在黑名单中。`
+                  });
+                  core.setOutput('blacklisted', 'true');
+                  return;
+                }
+              }
+
+              if (hostname) {
+                const urlPattern = new RegExp('\\| 目标网站 URL \\| ([^|]+) \\|', 'g');
+                while ((match = urlPattern.exec(allText)) !== null) {
+                  try {
+                    const blacklistedHost = new URL(match[1].trim()).hostname;
+                    if (blacklistedHost === hostname) {
+                      await github.rest.issues.createComment({
+                        issue_number: context.issue.number,
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        body: `## 🚫 操作被拒绝\n\n网站 ${hostname} 已在黑名单中。`
+                      });
+                      core.setOutput('blacklisted', 'true');
+                      return;
+                    }
+                  } catch (e) {}
+                }
+              }
+            } catch (e) {}
+
+            core.setOutput('blacklisted', 'false');
+            core.setOutput('exempt', 'false');
+            core.setOutput('exempt_note', '');
+        env:
+          BLACKLIST_DISCUSSION_NUMBER: ${{ secrets.BLACKLIST_DISCUSSION_NUMBER }}
+
+      - name: 处理删除友链
+        if: (steps.action-type.outputs.action_type == 'delete' || steps.action-type.outputs.action_type == 'delete_and_blacklist') && steps.check-blacklist.outputs.blacklisted != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            const actionType = '${{ steps.action-type.outputs.action_type }}';
+            let friendName = '${{ steps.action-type.outputs.friend_name }}';
+            const parsedName = '${{ steps.parse-issue.outputs.name }}';
+
+            if (actionType === 'delete_and_blacklist' || !friendName) {
+              friendName = parsedName;
+            }
+
+            if (!friendName) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '## ❌ 删除失败\n\n无法确定要删除的友链名称。'
+              });
+              return;
+            }
+
+            const isHexo = process.env.is_hexo === 'true';
+            const targetDir = process.env.target_dir || '';
+            const workDir = isHexo ? '.' : targetDir;
+            const filePath = `${workDir}/source/_data/link.yml`;
+
+            let content = fs.readFileSync(filePath, 'utf-8');
+
+            const NL = String.fromCharCode(10);
+            const lines = content.split(NL);
+            let newLines = [];
+            let skip = false;
+            let found = false;
+
+            for (let i = 0; i < lines.length; i++) {
+              const line = lines[i];
+              if (line.match(/^\s*- name:\s*(.*)/) && line.includes(friendName)) {
+                skip = true;
+                found = true;
+                continue;
+              }
+              if (skip) {
+                if (line.match(/^\s*- name:/) || line.match(/^- class_name:/) || line.match(/^link_list:/)) {
+                  skip = false;
+                  newLines.push(line);
+                }
+                continue;
+              }
+              newLines.push(line);
+            }
+
+            if (!found) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ❌ 删除失败\n\n未找到名为 "${friendName}" 的友链。`
+              });
+              return;
+            }
+
+            content = newLines.join(NL);
+            fs.writeFileSync(filePath, content, 'utf-8');
+
+            const commitDir = isHexo ? '.' : targetDir;
+            const execOpts = { cwd: commitDir };
+
+            execSync('git config user.name "github-actions[bot]"', execOpts);
+            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"', execOpts);
+            execSync('git add source/_data/link.yml', execOpts);
+            execSync('git commit -m "删除友链 ' + friendName + '"', execOpts);
+
+            if (isHexo) {
+              execSync('git push', execOpts);
+            } else {
+              execSync('git push origin HEAD:main', execOpts);
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ 友链已删除\n\n已成功删除友链：${friendName}`
+            });
+
+            core.setOutput('deleted', 'true');
+            core.setOutput('friend_name', friendName);
+        env:
+          is_hexo: ${{ steps.detect-repo.outputs.is_hexo }}
+          target_dir: ${{ steps.detect-repo.outputs.target_dir }}
+
+      - name: 处理拉黑
+        if: (steps.action-type.outputs.action_type == 'blacklist' || steps.action-type.outputs.action_type == 'delete_and_blacklist') && steps.check-blacklist.outputs.blacklisted != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const userLogin = '${{ steps.parse-issue.outputs.user_login }}';
+            const url = '${{ steps.parse-issue.outputs.url_raw }}';
+            const friendName = '${{ steps.action-type.outputs.friend_name }}' || '${{ steps.parse-issue.outputs.name }}';
+            const discussionNumber = process.env.BLACKLIST_DISCUSSION_NUMBER;
+            const operator = context.repo.owner;
+            const exemptNote = '${{ steps.check-blacklist.outputs.exempt_note }}';
+
+            if (!discussionNumber) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '## ❌ 拉黑失败\n\n未配置 BLACKLIST_DISCUSSION_NUMBER 环境变量。'
+              });
+              return;
+            }
+
+            let userId = '';
+            try {
+              const userResponse = await github.request('GET /users/{username}', {
+                username: userLogin
+              });
+              userId = userResponse.data.id;
+            } catch (e) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ❌ 拉黑失败\n\n无法获取用户 ${userLogin} 的信息。`
+              });
+              return;
+            }
+
+            const NL = String.fromCharCode(10);
+            const commentBody = "## 🚫 拉黑记录" + NL + NL + "| 字段 | 值 |" + NL + "|------|-----|" + NL + "| 来源 Issue | #" + context.issue.number + " |" + NL + "| 被拉黑人名称 | " + userLogin + " |" + NL + "| 被拉黑人 ID | " + userId + " |" + NL + "| 目标网站 URL | " + url + " |" + NL + "| 操作人 | " + operator + " |" + NL + "| 友链名称 | " + friendName + " |" + NL + NL + "> 由 GitHub Actions 自动添加";
+
+            try {
+              await github.graphql(`
+                mutation($repoId: ID!, $discussionNumber: Int!, $body: String!) {
+                  addDiscussionComment(input: {discussionId: $repoId, discussionNumber: $discussionNumber, body: $body}) {
+                    comment {
+                      id
+                    }
+                  }
+                }
+              `, {
+                repoId: context.repo.repo,
+                discussionNumber: parseInt(discussionNumber),
+                body: commentBody
+              });
+            } catch (e) {
+              const discussionUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/discussions/${discussionNumber}`;
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ⚠️ 拉黑记录添加失败\n\n无法在 Discussion #${discussionNumber} 中添加记录。请手动添加：\n\n${discussionUrl}\n\n\`\`\`\n${commentBody}\n\`\`\``
+              });
+              return;
+            }
+
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ 已拉黑\n\n已在拉黑记录中添加：${userLogin} (${userId})${exemptNote}`
+            });
+        env:
+          BLACKLIST_DISCUSSION_NUMBER: ${{ secrets.BLACKLIST_DISCUSSION_NUMBER }}
+
+      - name: 清理历史标签并添加申请中
+        if: steps.action-type.outputs.action_type == 'add' && steps.check-blacklist.outputs.blacklisted != 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commentBody = context.eventName === 'issue_comment' ? context.payload.comment.body : '';
+            const isManualApproval = commentBody === '通过验证' && context.payload.comment.user.login === context.repo.owner;
             
             if (!isManualApproval) {
               const labelsToRemove = ['网站不可达', '无效', '已通过'];
@@ -117,6 +439,7 @@ jobs:
 
       - name: 验证必填字段
         id: validate-fields
+        if: steps.action-type.outputs.action_type == 'add' && steps.check-blacklist.outputs.blacklisted != 'true'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -179,9 +502,18 @@ jobs:
 
       - name: 验证网站有效性
         id: validate-website
-        if: steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true'
+        if: steps.action-type.outputs.action_type == 'add' && steps.check-blacklist.outputs.blacklisted != 'true' && steps.validate-fields.outputs.valid == 'true'
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_USER: ${{ github.event.comment.user.login }}
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           URL="${{ steps.validate-fields.outputs.url }}"
+          
+          if [ "$COMMENT_USER" = "$REPO_OWNER" ] && [ "$COMMENT_BODY" = "通过验证" ]; then
+            echo "skip_validation=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
           
           for i in 1 2 3; do
             RESULT=$(curl -o /dev/null -s -w "%{http_code}\n%{redirect_url}" --max-time 10 "$URL" 2>/dev/null || echo "")
@@ -204,7 +536,12 @@ jobs:
           fi
 
       - name: 处理验证失败
-        if: steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true' && (steps.validate-website.outputs.unreachable == 'true' || steps.validate-website.outputs.status_code != '200' || steps.validate-website.outputs.redirect == 'true')
+        if: |
+          steps.action-type.outputs.action_type == 'add' && 
+          steps.check-blacklist.outputs.blacklisted != 'true' &&
+          steps.validate-fields.outputs.valid == 'true' && 
+          steps.validate-website.outputs.skip_validation != 'true' &&
+          (steps.validate-website.outputs.unreachable == 'true' || steps.validate-website.outputs.status_code != '200' || steps.validate-website.outputs.redirect == 'true')
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -246,8 +583,10 @@ jobs:
 
       - name: 添加友链
         if: |
-          (steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval == 'true') ||
-          (steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true' && steps.validate-website.outputs.unreachable != 'true' && steps.validate-website.outputs.status_code == '200' && steps.validate-website.outputs.redirect != 'true')
+          steps.action-type.outputs.action_type == 'add' &&
+          steps.check-blacklist.outputs.blacklisted != 'true' &&
+          ((steps.validate-fields.outputs.valid == 'true' && steps.validate-website.outputs.skip_validation == 'true') ||
+          (steps.validate-fields.outputs.valid == 'true' && steps.validate-website.outputs.unreachable != 'true' && steps.validate-website.outputs.status_code == '200' && steps.validate-website.outputs.redirect != 'true'))
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -296,18 +635,15 @@ jobs:
               newFriend += NL + "      siteshot: " + siteshot;
             }
 
-            // 找到 link_list: 所在位置，然后找到该分类下的最后一个友链条目
             const linkListMatch = content.match(/link_list:\s*\n([\s\S]*?)(?=\n- class_name:|\n#|$)/);
             if (linkListMatch) {
               const linkListContent = linkListMatch[1];
-              // 找到最后一个 - name: 条目
               const lastEntryMatch = linkListContent.match(/[\s\S]*- name:[\s\S]*?(?=\n    - name:|\n- class_name:|\n#|$)/g);
               if (lastEntryMatch) {
                 const lastEntry = lastEntryMatch[lastEntryMatch.length - 1];
                 const insertPos = content.indexOf(lastEntry) + lastEntry.length;
                 content = content.slice(0, insertPos) + NL + newFriend + content.slice(insertPos);
               } else {
-                // link_list 为空，直接添加
                 content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + NL);
               }
             } else {
@@ -315,7 +651,6 @@ jobs:
             }
             fs.writeFileSync(filePath, content, 'utf-8');
 
-            // 提交更改
             const commitDir = isHexo ? '.' : targetDir;
             const execOpts = { cwd: commitDir };
 
@@ -330,7 +665,6 @@ jobs:
               execSync('git push origin HEAD:main', execOpts);
             }
 
-            // 更新 Issue 状态
             await github.rest.issues.removeLabel({
               issue_number: context.issue.number,
               owner: context.repo.owner,
