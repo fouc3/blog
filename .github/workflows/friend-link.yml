@@ -61,12 +61,15 @@ jobs:
             // 如果不是人工审核通过，添加"申请中"标签
             if (!isManualApproval) {
               // 移除可能存在的旧标签
-              await github.rest.issues.removeLabel({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                name: '网站不可达'
-              }).catch(() => {});
+              const labelsToRemove = ['网站不可达', '无效', '已通过'];
+              for (const label of labelsToRemove) {
+                await github.rest.issues.removeLabel({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label
+                }).catch(() => {});
+              }
               
               await github.rest.issues.addLabels({
                 issue_number: context.issue.number,
