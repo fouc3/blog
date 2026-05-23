@@ -1,0 +1,300 @@
+name: 友链申请处理
+
+on:
+  issues:
+    types: [opened, labeled]
+  issue_comment:
+    types: [created]
+
+jobs:
+  add-friend:
+    if: |
+      (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, '友链申请')) ||
+      (github.event_name == 'issue_comment' && (github.event.comment.body == '通过验证' || github.event.comment.body == '重新验证') && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证')
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 处理友链申请
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            const isManualApproval = context.eventName === 'issue_comment' && context.payload.comment.body === '通过验证' && context.payload.comment.user.login === context.repo.owner;
+            const isRevalidate = context.eventName === 'issue_comment' && context.payload.comment.body === '重新验证';
+
+            // 获取 Issue 信息
+            let issue;
+            if (context.eventName === 'issue_comment') {
+              const response = await github.rest.issues.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number
+              });
+              issue = response.data;
+            } else {
+              issue = context.payload.issue;
+            }
+
+            const body = issue.body;
+
+            function extract(key) {
+              const pattern = new RegExp('### ' + key + '\\s*\\n\\s*(.*?)(?=\\n###|\\Z)', 's');
+              const m = body.match(pattern);
+              if (m) {
+                let val = m[1].trim();
+                if (val === 'No response') return '';
+                return val.replace(/^`|`$/g, '').trim();
+              }
+              return '';
+            }
+
+            // 如果不是人工审核通过，添加"申请中"标签
+            if (!isManualApproval) {
+              // 移除可能存在的旧标签
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: '网站不可达'
+              }).catch(() => {});
+              
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['申请中']
+              });
+            }
+
+            const name = extract('网站名称');
+            const urlRaw = extract('网站链接');
+            const avatar = extract('网站头像 URL');
+            const desc = extract('网站描述');
+            const siteshot = extract('网站预览图 URL');
+
+            // 验证必填字段
+            if (!name || !urlRaw || !avatar) {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: '申请中'
+              }).catch(() => {});
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['无效']
+              });
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: '## ❌ 友链申请失败\n\n请确保已填写**网站名称**、**网站链接**和**网站头像 URL**，然后编辑此 Issue 重新触发。'
+              });
+              return;
+            }
+
+            // 验证 URL 格式
+            let url;
+            try {
+              url = new URL(urlRaw).origin.replace(/\/$/, '');
+            } catch (e) {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: '申请中'
+              }).catch(() => {});
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['无效']
+              });
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ❌ URL 格式无效\n\n"${urlRaw}" 不是有效的 URL，请提供完整的 URL（包含 https://）。`
+              });
+              return;
+            }
+
+            // 如果不是人工审核通过，验证网站有效性
+            if (!isManualApproval) {
+              let statusCode = '';
+              let redirect = false;
+              let unreachable = false;
+
+              for (let i = 0; i < 3; i++) {
+                try {
+                  const result = execSync(`curl -o /dev/null -s -w "%{http_code}\\n%{redirect_url}" --max-time 10 "${url}"`, { encoding: 'utf-8' });
+                  const lines = result.trim().split('\n');
+                  statusCode = lines[0] || '';
+                  const redirectUrl = lines[1] || '';
+                  redirect = redirectUrl.length > 0;
+                  break;
+                } catch (e) {
+                  if (i === 2) {
+                    unreachable = true;
+                  }
+                }
+              }
+
+              if (unreachable) {
+                await github.rest.issues.removeLabel({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: '申请中'
+                }).catch(() => {});
+                await github.rest.issues.addLabels({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  labels: ['网站不可达']
+                });
+                await github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `## ⚠️ 网站不可达\n\n无法访问 ${url}，请检查网站是否正常运行。\n\n修复后可回复"重新验证"再次尝试。`
+                });
+                return;
+              }
+
+              if (statusCode !== '200' || redirect) {
+                const owner = context.repo.owner;
+                await github.rest.issues.removeLabel({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: '申请中'
+                }).catch(() => {});
+                await github.rest.issues.addLabels({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  labels: ['网站不可达']
+                });
+                await github.rest.issues.createComment({
+                  issue_number: context.issue.number,
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  body: `## ⚠️ 需要人工审核\n\n网站验证结果：\n- 状态码：${statusCode || '未知'}\n- 重定向：${redirect ? '是' : '否'}\n\n@${owner} 请人工审核此友链申请。\n- 如需通过，请回复"通过验证"\n- 如需重新验证，请回复"重新验证"`
+                });
+                return;
+              }
+            }
+
+            // 检查是否为有效的 Hexo 仓库
+            const isHexoRepo = fs.existsSync('_config.yml') && fs.existsSync('source/_data');
+
+            let targetOwner, targetRepo, commitToken;
+
+            if (isHexoRepo) {
+              targetOwner = context.repo.owner;
+              targetRepo = context.repo.repo;
+              commitToken = process.env.GITHUB_TOKEN;
+            } else {
+              const targetRepoFull = process.env.GITHUB_REPOSITORY;
+              [targetOwner, targetRepo] = targetRepoFull.split('/');
+              commitToken = process.env.GITHUB_PUT;
+            }
+
+            // 读取 link.yml
+            const filePath = 'source/_data/link.yml';
+            let content = fs.readFileSync(filePath, 'utf-8');
+
+            if (content.includes(url)) {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: '申请中'
+              }).catch(() => {});
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ℹ️ 友链已存在\n\n该链接已在友链列表中，无需重复添加。`
+              });
+              await github.rest.issues.update({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                state: 'closed'
+              });
+              return;
+            }
+
+            let newFriend = "\\n    - name: " + name + "\\n      link: " + url + "/\\n      avatar: " + avatar + "\\n      descr: " + (desc || name);
+
+            if (siteshot) {
+              newFriend += "\\n      siteshot: " + siteshot;
+            }
+
+            content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + '\n');
+
+            fs.writeFileSync(filePath, content, 'utf-8');
+
+            if (isHexoRepo) {
+              execSync('git config user.name "github-actions[bot]"');
+              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+              execSync('git add source/_data/link.yml');
+              execSync('git commit -m "更新友链 ' + name + '"');
+              execSync('git push');
+            } else {
+              execSync('git config user.name "github-actions[bot]"');
+              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
+              execSync('git remote set-url origin https://x-access-token:' + commitToken + '@github.com/' + targetOwner + '/' + targetRepo + '.git');
+              execSync('git add source/_data/link.yml');
+              execSync('git commit -m "更新友链 ' + name + '"');
+              execSync('git push origin HEAD:main');
+            }
+
+            // 移除旧标签，添加"已通过"标签，关闭 Issue
+            await github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: '申请中'
+            }).catch(() => {});
+            await github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: '网站不可达'
+            }).catch(() => {});
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['已通过']
+            });
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## ✅ 友链申请已通过！\n\n感谢申请！友链已成功添加。\n\n📋 **友链信息**\n- 名称：${name}\n- 链接：${url}\n- 头像：${avatar}\n- 描述：${desc || '无'}\n${siteshot ? '- 预览图：' + siteshot : ''}\n\n请在你的友链页面确认已添加本站友链。感谢支持！🎉`
+            });
+            await github.rest.issues.update({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'closed'
+            });
+        env:
+          GITHUB_PUT: ${{ secrets.GITHUB_PUT }}
+          GITHUB_REPOSITORY: ${{ secrets.GITHUB_REPOSITORY }}

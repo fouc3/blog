@@ -1,0 +1,62 @@
+name: 🤝 申请友链
+description: 申请与本站交换友链
+title: "[友链申请] "
+labels: ["友链申请"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        # 🤝 友链申请
+        
+        请填写以下信息，我们将在收到申请后尽快审核。
+        
+        ## 申请要求
+        1. 先在你的网站添加本站友链
+        2. 内容符合法律法规
+        3. 网站可正常访问
+
+        ## 本站友链信息
+        - **名称**: FouC3的博客
+        - **链接**: `https://blog.fouc3.fyi`
+        - **头像**: 暂无（没找到好看的）
+        - **描述**: 这只是一个普普通通的博客
+
+  - type: input
+    id: name
+    attributes:
+      label: "网站名称"
+      description: "你的网站名称"
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: "网站链接"
+      description: "你的网站 URL（完整 URL，包含 https://）"
+    validations:
+      required: true
+
+  - type: input
+    id: avatar
+    attributes:
+      label: "网站头像 URL"
+      description: "你的网站头像/Logo 图片链接"
+    validations:
+      required: true
+
+  - type: input
+    id: description
+    attributes:
+      label: "网站描述"
+      description: "简短描述你的网站"
+    validations:
+      required: false
+
+  - type: input
+    id: siteshot
+    attributes:
+      label: "网站预览图 URL"
+      description: "你的网站预览截图链接（非必填，不填写将由 WordPress mShots 自动生成）"
+    validations:
+      required: false
