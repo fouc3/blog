@@ -384,7 +384,7 @@ jobs:
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `## ❌ 拉黑失败\n\n无法获取用户 ${userLogin} 的信息。`
+                body: "## ❌ 拉黑失败\n\n无法获取用户 " + userLogin + " 的信息。"
               });
               return;
             }
@@ -440,7 +440,7 @@ jobs:
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: "## ⚠️ 拉黑记录添加失败\n\n无法在 Discussion #" + discussionNumber + " 中添加记录。请手动添加：\n\n" + discussionUrl + "\n\n```\n" + commentBody + "\n```"
+                body: "## ⚠️ 拉黑记录添加失败\n\n无法在 Discussion #" + discussionNumber + " 中添加记录。请手动添加：\n\n" + discussionUrl + "\n\n代码块内容：\n" + commentBody
               });
               return;
             }
@@ -449,7 +449,7 @@ jobs:
               issue_number: context.issue.number,
               owner: context.repo.owner,
               repo: context.repo.repo,
-              body: `## ✅ 已拉黑\n\n已在拉黑记录中添加：${userLogin} (${userId})${exemptNote}`
+              body: "## ✅ 已拉黑\n\n已在拉黑记录中添加：" + userLogin + " (" + userId + ")" + exemptNote
             });
         env:
           BLACKLIST_DISCUSSION_NUMBER: ${{ secrets.BLACKLIST_DISCUSSION_NUMBER }}
