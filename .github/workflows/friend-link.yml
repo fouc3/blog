@@ -290,12 +290,29 @@ jobs:
               return;
             }
 
-            let newFriend = "\\n    - name: " + name + "\\n      link: " + url + "/\\n      avatar: " + avatar + "\\n      descr: " + (desc || name);
+            const NL = String.fromCharCode(10);
+            let newFriend = "    - name: " + name + NL + "      link: " + url + "/" + NL + "      avatar: " + avatar + NL + "      descr: " + (desc || name);
             if (siteshot) {
-              newFriend += "\\n      siteshot: " + siteshot;
+              newFriend += NL + "      siteshot: " + siteshot;
             }
 
-            content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + '\n');
+            // 找到 link_list: 所在位置，然后找到该分类下的最后一个友链条目
+            const linkListMatch = content.match(/link_list:\s*\n([\s\S]*?)(?=\n- class_name:|\n#|$)/);
+            if (linkListMatch) {
+              const linkListContent = linkListMatch[1];
+              // 找到最后一个 - name: 条目
+              const lastEntryMatch = linkListContent.match(/[\s\S]*- name:[\s\S]*?(?=\n    - name:|\n- class_name:|\n#|$)/g);
+              if (lastEntryMatch) {
+                const lastEntry = lastEntryMatch[lastEntryMatch.length - 1];
+                const insertPos = content.indexOf(lastEntry) + lastEntry.length;
+                content = content.slice(0, insertPos) + NL + newFriend + content.slice(insertPos);
+              } else {
+                // link_list 为空，直接添加
+                content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + NL);
+              }
+            } else {
+              content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + NL);
+            }
             fs.writeFileSync(filePath, content, 'utf-8');
 
             // 提交更改
