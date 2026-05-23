@@ -2,7 +2,7 @@ name: 友链申请处理
 
 on:
   issues:
-    types: [opened, labeled]
+    types: [opened]
   issue_comment:
     types: [created]
 
@@ -70,7 +70,7 @@ jobs:
               const m = body.match(pattern);
               if (m) {
                 let val = m[1].trim();
-                if (val === 'No response') return '';
+                if (val === 'No response' || val === '_No response_') return '';
                 return val.replace(/^`|`$/g, '').trim();
               }
               return '';
