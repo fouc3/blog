@@ -10,7 +10,7 @@ jobs:
   add-friend:
     if: |
       (github.event_name == 'issues' && contains(github.event.issue.labels.*.name, '友链申请')) ||
-      (github.event_name == 'issue_comment' && (github.event.comment.body == '通过验证' || github.event.comment.body == '重新验证') && github.event.comment.user.login == github.repository_owner) ||
+      (github.event_name == 'issue_comment' && github.event.comment.body == '通过验证' && github.event.comment.user.login == github.repository_owner) ||
       (github.event_name == 'issue_comment' && github.event.comment.body == '重新验证')
     runs-on: ubuntu-latest
     permissions:
@@ -18,21 +18,39 @@ jobs:
       contents: write
 
     steps:
-      - name: Checkout
+      - name: Checkout 当前仓库
         uses: actions/checkout@v4
 
-      - name: 处理友链申请
+      - name: 检测仓库类型并 Checkout 目标仓库
+        id: detect-repo
+        run: |
+          if [ -f "_config.yml" ] && [ -d "source/_data" ]; then
+            echo "is_hexo=true" >> $GITHUB_OUTPUT
+            echo "is_hexo=true" >> $GITHUB_ENV
+          else
+            echo "is_hexo=false" >> $GITHUB_OUTPUT
+            echo "is_hexo=false" >> $GITHUB_ENV
+            
+            if [ -n "${{ secrets.PUT_TOKEN }}" ] && [ -n "${{ secrets.TARGET_REPOSITORY }}" ]; then
+              IFS='/' read -r OWNER REPO <<< "${{ secrets.TARGET_REPOSITORY }}"
+              git clone --depth=1 https://x-access-token:${{ secrets.PUT_TOKEN }}@github.com/${{ secrets.TARGET_REPOSITORY }}.git target_repo
+              cd target_repo
+              echo "target_dir=$(pwd)" >> $GITHUB_OUTPUT
+              echo "target_dir=$(pwd)" >> $GITHUB_ENV
+            else
+              echo "未配置 PUT_TOKEN 和 TARGET_REPOSITORY secrets"
+              exit 1
+            fi
+          fi
+
+      - name: 解析 Issue 内容
+        id: parse-issue
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            const { execSync } = require('child_process');
-
             const isManualApproval = context.eventName === 'issue_comment' && context.payload.comment.body === '通过验证' && context.payload.comment.user.login === context.repo.owner;
-            const isRevalidate = context.eventName === 'issue_comment' && context.payload.comment.body === '重新验证';
 
-            // 获取 Issue 信息
             let issue;
             if (context.eventName === 'issue_comment') {
               const response = await github.rest.issues.get({
@@ -58,9 +76,27 @@ jobs:
               return '';
             }
 
-            // 如果不是人工审核通过，添加"申请中"标签
+            const name = extract('网站名称');
+            const urlRaw = extract('网站链接');
+            const avatar = extract('网站头像 URL');
+            const desc = extract('网站描述');
+            const siteshot = extract('网站预览图 URL');
+
+            core.setOutput('name', name);
+            core.setOutput('url_raw', urlRaw);
+            core.setOutput('avatar', avatar);
+            core.setOutput('desc', desc);
+            core.setOutput('siteshot', siteshot);
+            core.setOutput('is_manual_approval', isManualApproval);
+
+      - name: 清理历史标签并添加申请中
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const isManualApproval = '${{ steps.parse-issue.outputs.is_manual_approval }}' === 'true';
+            
             if (!isManualApproval) {
-              // 移除可能存在的旧标签
               const labelsToRemove = ['网站不可达', '无效', '已通过'];
               for (const label of labelsToRemove) {
                 await github.rest.issues.removeLabel({
@@ -79,13 +115,16 @@ jobs:
               });
             }
 
-            const name = extract('网站名称');
-            const urlRaw = extract('网站链接');
-            const avatar = extract('网站头像 URL');
-            const desc = extract('网站描述');
-            const siteshot = extract('网站预览图 URL');
+      - name: 验证必填字段
+        id: validate-fields
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const name = '${{ steps.parse-issue.outputs.name }}';
+            const urlRaw = '${{ steps.parse-issue.outputs.url_raw }}';
+            const avatar = '${{ steps.parse-issue.outputs.avatar }}';
 
-            // 验证必填字段
             if (!name || !urlRaw || !avatar) {
               await github.rest.issues.removeLabel({
                 issue_number: context.issue.number,
@@ -105,10 +144,10 @@ jobs:
                 repo: context.repo.repo,
                 body: '## ❌ 友链申请失败\n\n请确保已填写**网站名称**、**网站链接**和**网站头像 URL**，然后编辑此 Issue 重新触发。'
               });
+              core.setOutput('valid', 'false');
               return;
             }
 
-            // 验证 URL 格式
             let url;
             try {
               url = new URL(urlRaw).origin.replace(/\/$/, '');
@@ -131,93 +170,102 @@ jobs:
                 repo: context.repo.repo,
                 body: `## ❌ URL 格式无效\n\n"${urlRaw}" 不是有效的 URL，请提供完整的 URL（包含 https://）。`
               });
+              core.setOutput('valid', 'false');
               return;
             }
 
-            // 如果不是人工审核通过，验证网站有效性
-            if (!isManualApproval) {
-              let statusCode = '';
-              let redirect = false;
-              let unreachable = false;
+            core.setOutput('valid', 'true');
+            core.setOutput('url', url);
 
-              for (let i = 0; i < 3; i++) {
-                try {
-                  const result = execSync(`curl -o /dev/null -s -w "%{http_code}\\n%{redirect_url}" --max-time 10 "${url}"`, { encoding: 'utf-8' });
-                  const lines = result.trim().split('\n');
-                  statusCode = lines[0] || '';
-                  const redirectUrl = lines[1] || '';
-                  redirect = redirectUrl.length > 0;
-                  break;
-                } catch (e) {
-                  if (i === 2) {
-                    unreachable = true;
-                  }
-                }
-              }
+      - name: 验证网站有效性
+        id: validate-website
+        if: steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true'
+        run: |
+          URL="${{ steps.validate-fields.outputs.url }}"
+          
+          for i in 1 2 3; do
+            RESULT=$(curl -o /dev/null -s -w "%{http_code}\n%{redirect_url}" --max-time 10 "$URL" 2>/dev/null || echo "")
+            if [ -n "$RESULT" ]; then
+              STATUS_CODE=$(echo "$RESULT" | head -n1)
+              REDIRECT_URL=$(echo "$RESULT" | tail -n1)
+              break
+            fi
+            if [ $i -eq 3 ]; then
+              echo "unreachable=true" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          done
+          
+          echo "status_code=$STATUS_CODE" >> $GITHUB_OUTPUT
+          if [ -n "$REDIRECT_URL" ]; then
+            echo "redirect=true" >> $GITHUB_OUTPUT
+          else
+            echo "redirect=false" >> $GITHUB_OUTPUT
+          fi
 
-              if (unreachable) {
-                await github.rest.issues.removeLabel({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: '申请中'
-                }).catch(() => {});
-                await github.rest.issues.addLabels({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  labels: ['网站不可达']
-                });
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: `## ⚠️ 网站不可达\n\n无法访问 ${url}，请检查网站是否正常运行。\n\n修复后可回复"重新验证"再次尝试。`
-                });
-                return;
-              }
+      - name: 处理验证失败
+        if: steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true' && (steps.validate-website.outputs.unreachable == 'true' || steps.validate-website.outputs.status_code != '200' || steps.validate-website.outputs.redirect == 'true')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const unreachable = '${{ steps.validate-website.outputs.unreachable }}' === 'true';
+            const statusCode = '${{ steps.validate-website.outputs.status_code }}';
+            const redirect = '${{ steps.validate-website.outputs.redirect }}' === 'true';
+            const url = '${{ steps.validate-fields.outputs.url }}';
 
-              if (statusCode !== '200' || redirect) {
-                const owner = context.repo.owner;
-                await github.rest.issues.removeLabel({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  name: '申请中'
-                }).catch(() => {});
-                await github.rest.issues.addLabels({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  labels: ['网站不可达']
-                });
-                await github.rest.issues.createComment({
-                  issue_number: context.issue.number,
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  body: `## ⚠️ 需要人工审核\n\n网站验证结果：\n- 状态码：${statusCode || '未知'}\n- 重定向：${redirect ? '是' : '否'}\n\n@${owner} 请人工审核此友链申请。\n- 如需通过，请回复"通过验证"\n- 如需重新验证，请回复"重新验证"`
-                });
-                return;
-              }
-            }
+            await github.rest.issues.removeLabel({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: '申请中'
+            }).catch(() => {});
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['网站不可达']
+            });
 
-            // 检查是否为有效的 Hexo 仓库
-            const isHexoRepo = fs.existsSync('_config.yml') && fs.existsSync('source/_data');
-
-            let targetOwner, targetRepo, commitToken;
-
-            if (isHexoRepo) {
-              targetOwner = context.repo.owner;
-              targetRepo = context.repo.repo;
-              commitToken = process.env.GITHUB_TOKEN;
+            if (unreachable) {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ⚠️ 网站不可达\n\n无法访问 ${url}，请检查网站是否正常运行。\n\n修复后可回复"重新验证"再次尝试。`
+              });
             } else {
-              const targetRepoFull = process.env.TARGET_REPOSITORY;
-              [targetOwner, targetRepo] = targetRepoFull.split('/');
-              commitToken = process.env.PUT_TOKEN;
+              const owner = context.repo.owner;
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: `## ⚠️ 需要人工审核\n\n网站验证结果：\n- 状态码：${statusCode || '未知'}\n- 重定向：${redirect ? '是' : '否'}\n\n@${owner} 请人工审核此友链申请。\n- 如需通过，请回复"通过验证"\n- 如需重新验证，请回复"重新验证"\n\n> ⚠️ 注意："通过验证"仅仓库所有者可用`
+              });
             }
 
-            // 读取 link.yml
-            const filePath = 'source/_data/link.yml';
+      - name: 添加友链
+        if: |
+          (steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval == 'true') ||
+          (steps.validate-fields.outputs.valid == 'true' && steps.parse-issue.outputs.is_manual_approval != 'true' && steps.validate-website.outputs.unreachable != 'true' && steps.validate-website.outputs.status_code == '200' && steps.validate-website.outputs.redirect != 'true')
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const { execSync } = require('child_process');
+
+            const name = '${{ steps.parse-issue.outputs.name }}';
+            const url = '${{ steps.validate-fields.outputs.url }}';
+            const avatar = '${{ steps.parse-issue.outputs.avatar }}';
+            const desc = '${{ steps.parse-issue.outputs.desc }}';
+            const siteshot = '${{ steps.parse-issue.outputs.siteshot }}';
+            const isHexo = process.env.is_hexo === 'true';
+            const targetDir = process.env.target_dir || '';
+
+            const workDir = isHexo ? '.' : targetDir;
+            const filePath = `${workDir}/source/_data/link.yml`;
+
             let content = fs.readFileSync(filePath, 'utf-8');
 
             if (content.includes(url)) {
@@ -243,31 +291,29 @@ jobs:
             }
 
             let newFriend = "\\n    - name: " + name + "\\n      link: " + url + "/\\n      avatar: " + avatar + "\\n      descr: " + (desc || name);
-
             if (siteshot) {
               newFriend += "\\n      siteshot: " + siteshot;
             }
 
             content = content.replace(/(link_list:\s*\n)/, '$1' + newFriend + '\n');
-
             fs.writeFileSync(filePath, content, 'utf-8');
 
-            if (isHexoRepo) {
-              execSync('git config user.name "github-actions[bot]"');
-              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
-              execSync('git add source/_data/link.yml');
-              execSync('git commit -m "更新友链 ' + name + '"');
-              execSync('git push');
+            // 提交更改
+            const commitDir = isHexo ? '.' : targetDir;
+            const execOpts = { cwd: commitDir };
+
+            execSync('git config user.name "github-actions[bot]"', execOpts);
+            execSync('git config user.email "github-actions[bot]@users.noreply.github.com"', execOpts);
+            execSync('git add source/_data/link.yml', execOpts);
+            execSync('git commit -m "更新友链 ' + name + '"', execOpts);
+
+            if (isHexo) {
+              execSync('git push', execOpts);
             } else {
-              execSync('git config user.name "github-actions[bot]"');
-              execSync('git config user.email "github-actions[bot]@users.noreply.github.com"');
-              execSync('git remote set-url origin https://x-access-token:' + commitToken + '@github.com/' + targetOwner + '/' + targetRepo + '.git');
-              execSync('git add source/_data/link.yml');
-              execSync('git commit -m "更新友链 ' + name + '"');
-              execSync('git push origin HEAD:main');
+              execSync('git push origin HEAD:main', execOpts);
             }
 
-            // 移除旧标签，添加"已通过"标签，关闭 Issue
+            // 更新 Issue 状态
             await github.rest.issues.removeLabel({
               issue_number: context.issue.number,
               owner: context.repo.owner,
@@ -299,5 +345,5 @@ jobs:
               state: 'closed'
             });
         env:
-          PUT_TOKEN: ${{ secrets.PUT_TOKEN }}
-          TARGET_REPOSITORY: ${{ secrets.TARGET_REPOSITORY }}
+          is_hexo: ${{ steps.detect-repo.outputs.is_hexo }}
+          target_dir: ${{ steps.detect-repo.outputs.target_dir }}
