@@ -320,6 +320,23 @@ jobs:
               execSync('git push origin HEAD:main', execOpts);
             }
 
+            // 更新标签
+            const labelsToRemove = ['已通过', '申请中', '网站不可达', '无效'];
+            for (const label of labelsToRemove) {
+              await github.rest.issues.removeLabel({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: label
+              }).catch(() => {});
+            }
+            await github.rest.issues.addLabels({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              labels: ['已删除']
+            });
+
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
