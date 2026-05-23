@@ -141,7 +141,7 @@ jobs:
             if (userLogin === context.repo.owner) {
               core.setOutput('blacklisted', 'false');
               core.setOutput('exempt', 'true');
-              core.setOutput('exempt_note', String.fromCharCode(10) + String.fromCharCode(10) + '> 💡 此 Issue 由仓库所有者创建，已豁免黑名单检查。');
+              core.setOutput('exempt_note', '\\n\\n> 💡 此 Issue 由仓库所有者创建，已豁免黑名单检查。');
               return;
             }
 
@@ -361,7 +361,8 @@ jobs:
             const friendName = '${{ steps.action-type.outputs.friend_name }}' || '${{ steps.parse-issue.outputs.name }}';
             const discussionNumber = process.env.BLACKLIST_DISCUSSION_NUMBER;
             const operator = context.repo.owner;
-            const exemptNote = '${{ steps.check-blacklist.outputs.exempt_note }}';
+            const exemptNoteRaw = '${{ steps.check-blacklist.outputs.exempt_note }}';
+            const exemptNote = exemptNoteRaw.replace(/\\n/g, String.fromCharCode(10));
 
             if (!discussionNumber) {
               await github.rest.issues.createComment({
