@@ -392,27 +392,55 @@ jobs:
             const NL = String.fromCharCode(10);
             const commentBody = "## 🚫 拉黑记录" + NL + NL + "| 字段 | 值 |" + NL + "|------|-----|" + NL + "| 来源 Issue | #" + context.issue.number + " |" + NL + "| 被拉黑人名称 | " + userLogin + " |" + NL + "| 被拉黑人 ID | " + userId + " |" + NL + "| 目标网站 URL | " + url + " |" + NL + "| 操作人 | " + operator + " |" + NL + "| 友链名称 | " + friendName + " |" + NL + NL + "> 由 GitHub Actions 自动添加";
 
+            // 先获取 discussion 的 node_id
+            let discussionNodeId;
+            try {
+              const queryResult = await github.graphql(`
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    discussion(number: $number) {
+                      id
+                    }
+                  }
+                }
+              `, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                number: parseInt(discussionNumber)
+              });
+              discussionNodeId = queryResult.repository.discussion.id;
+            } catch (e) {
+              const discussionUrl = "https://github.com/" + context.repo.owner + "/" + context.repo.repo + "/discussions/" + discussionNumber;
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: "## ❌ 拉黑失败\n\n无法获取 Discussion #" + discussionNumber + " 的信息。\n\n" + discussionUrl
+              });
+              return;
+            }
+
+            // 添加评论到 discussion
             try {
               await github.graphql(`
-                mutation($repoId: ID!, $discussionNumber: Int!, $body: String!) {
-                  addDiscussionComment(input: {discussionId: $repoId, discussionNumber: $discussionNumber, body: $body}) {
+                mutation($discussionId: ID!, $body: String!) {
+                  addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
                     comment {
                       id
                     }
                   }
                 }
               `, {
-                repoId: context.repo.repo,
-                discussionNumber: parseInt(discussionNumber),
+                discussionId: discussionNodeId,
                 body: commentBody
               });
             } catch (e) {
-              const discussionUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/discussions/${discussionNumber}`;
+              const discussionUrl = "https://github.com/" + context.repo.owner + "/" + context.repo.repo + "/discussions/" + discussionNumber;
               await github.rest.issues.createComment({
                 issue_number: context.issue.number,
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                body: `## ⚠️ 拉黑记录添加失败\n\n无法在 Discussion #${discussionNumber} 中添加记录。请手动添加：\n\n${discussionUrl}\n\n\`\`\`\n${commentBody}\n\`\`\``
+                body: "## ⚠️ 拉黑记录添加失败\n\n无法在 Discussion #" + discussionNumber + " 中添加记录。请手动添加：\n\n" + discussionUrl + "\n\n```\n" + commentBody + "\n```"
               });
               return;
             }
