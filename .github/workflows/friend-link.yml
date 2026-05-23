@@ -208,9 +208,9 @@ jobs:
               targetRepo = context.repo.repo;
               commitToken = process.env.GITHUB_TOKEN;
             } else {
-              const targetRepoFull = process.env.GITHUB_REPOSITORY;
+              const targetRepoFull = process.env.TARGET_REPOSITORY;
               [targetOwner, targetRepo] = targetRepoFull.split('/');
-              commitToken = process.env.GITHUB_PUT;
+              commitToken = process.env.PUT_TOKEN;
             }
 
             // 读取 link.yml
@@ -296,5 +296,5 @@ jobs:
               state: 'closed'
             });
         env:
-          GITHUB_PUT: ${{ secrets.GITHUB_PUT }}
-          GITHUB_REPOSITORY: ${{ secrets.GITHUB_REPOSITORY }}
+          PUT_TOKEN: ${{ secrets.PUT_TOKEN }}
+          TARGET_REPOSITORY: ${{ secrets.TARGET_REPOSITORY }}
